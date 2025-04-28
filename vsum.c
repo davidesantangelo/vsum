@@ -27,11 +27,11 @@
  */
 
 /**
- * @file vsize.c
- * @brief Implementation of the vsize library for efficient array processing.
+ * @file vsum.c
+ * @brief Implementation of the vsum library for efficient array processing.
  */
 
-#include "vsize.h" // Library header
+#include "vsum.h" // Library header
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h> // POSIX threads
@@ -58,13 +58,13 @@
 #endif
 
 // Maximum number of threads for parallel computation
-#define VSIZE_MAX_THREADS 8
+#define VSUM_MAX_THREADS 8
 // Common cache line size in bytes
-#define VSIZE_CACHE_LINE_SIZE 64
+#define VSUM_CACHE_LINE_SIZE 64
 // Minimum elements per thread to justify parallel overhead
 #define MIN_ELEMENTS_PER_THREAD 1024
 // Alignment requirement for AVX/AVX2 (256-bit = 32 bytes)
-#define VSIZE_AVX_ALIGNMENT 32
+#define VSUM_AVX_ALIGNMENT 32
 
 // --- Internal Runtime CPU Feature Detection ---
 
@@ -81,7 +81,7 @@ static bool features_checked = false;
 
 #if ARCH_X86
 // Helper function to check CPU features using CPUID (GCC/Clang specific)
-static void vsize_internal_check_cpu_features_x86(void)
+static void vsum_internal_check_cpu_features_x86(void)
 {
     if (features_checked)
         return;
@@ -122,11 +122,11 @@ static void vsize_internal_check_cpu_features_x86(void)
     }
 
     features_checked = true;
-    // printf("[vsize debug] SSE: %d, SSE2: %d, AVX: %d, AVX2: %d\n", sse_supported, sse2_supported, avx_supported, avx2_supported);
+    // printf("[vsum debug] SSE: %d, SSE2: %d, AVX: %d, AVX2: %d\n", sse_supported, sse2_supported, avx_supported, avx2_supported);
 }
 #elif ARCH_ARM_NEON
 // On ARM, NEON support is typically checked at compile time via __ARM_NEON
-static void vsize_internal_check_cpu_features_arm(void)
+static void vsum_internal_check_cpu_features_arm(void)
 {
     if (features_checked)
         return;
@@ -137,21 +137,21 @@ static void vsize_internal_check_cpu_features_arm(void)
 }
 #else
 // No specific runtime checks needed for architectures without known SIMD here
-static void vsize_internal_check_cpu_features_other(void)
+static void vsum_internal_check_cpu_features_other(void)
 {
     features_checked = true;
 }
 #endif
 
 // Unified function to trigger the check
-static void vsize_internal_ensure_features_checked(void)
+static void vsum_internal_ensure_features_checked(void)
 {
 #if ARCH_X86
-    vsize_internal_check_cpu_features_x86();
+    vsum_internal_check_cpu_features_x86();
 #elif ARCH_ARM_NEON
-    vsize_internal_check_cpu_features_arm();
+    vsum_internal_check_cpu_features_arm();
 #else
-    vsize_internal_check_cpu_features_other();
+    vsum_internal_check_cpu_features_other();
 #endif
 }
 
@@ -164,7 +164,7 @@ typedef struct
     size_t num_elements;
     int64_t partial_sum;
     int thread_id;
-} VsizeThreadDataInt;
+} VsumThreadDataInt;
 
 // Structure for float
 typedef struct
@@ -173,7 +173,7 @@ typedef struct
     size_t num_elements;
     double partial_sum; // Use double for intermediate sum precision
     int thread_id;
-} VsizeThreadDataFloat;
+} VsumThreadDataFloat;
 
 // Structure for double
 typedef struct
@@ -182,14 +182,14 @@ typedef struct
     size_t num_elements;
     double partial_sum;
     int thread_id;
-} VsizeThreadDataDouble;
+} VsumThreadDataDouble;
 
 // --- Internal Worker Functions (static) ---
 
 // Worker for int
 static void *process_sum_chunk_int(void *arg)
 {
-    VsizeThreadDataInt *data = (VsizeThreadDataInt *)arg;
+    VsumThreadDataInt *data = (VsumThreadDataInt *)arg;
     data->partial_sum = 0;
     for (size_t i = 0; i < data->num_elements; ++i)
     {
@@ -201,7 +201,7 @@ static void *process_sum_chunk_int(void *arg)
 // Worker for float
 static void *process_sum_chunk_float(void *arg)
 {
-    VsizeThreadDataFloat *data = (VsizeThreadDataFloat *)arg;
+    VsumThreadDataFloat *data = (VsumThreadDataFloat *)arg;
     data->partial_sum = 0.0;
     for (size_t i = 0; i < data->num_elements; ++i)
     {
@@ -213,7 +213,7 @@ static void *process_sum_chunk_float(void *arg)
 // Worker for double
 static void *process_sum_chunk_double(void *arg)
 {
-    VsizeThreadDataDouble *data = (VsizeThreadDataDouble *)arg;
+    VsumThreadDataDouble *data = (VsumThreadDataDouble *)arg;
     data->partial_sum = 0.0;
     for (size_t i = 0; i < data->num_elements; ++i)
     {
@@ -229,27 +229,25 @@ static void *process_sum_chunk_double(void *arg)
 /**
  * @brief Parallel sum of an integer array using POSIX threads.
  */
-int64_t vsize_parallel_sum_int(const int *array, size_t total_elements)
+int64_t vsum_parallel_sum_int(const int *array, size_t total_elements)
 {
     if (!array || total_elements == 0)
         return 0;
 
     int num_threads = total_elements / MIN_ELEMENTS_PER_THREAD;
-    if (num_threads > VSIZE_MAX_THREADS)
-        num_threads = VSIZE_MAX_THREADS;
+    if (num_threads > VSUM_MAX_THREADS)
+        num_threads = VSUM_MAX_THREADS;
     if (num_threads < 1)
         num_threads = 1;
 
     if (num_threads == 1)
     {
-        int64_t sum = 0;
-        for (size_t i = 0; i < total_elements; ++i)
-            sum += array[i];
-        return sum;
+        // Fallback to simple sequential sum for single thread case
+        return vsum_cache_friendly_sum_int(array, total_elements); // Or a direct loop
     }
 
-    pthread_t threads[VSIZE_MAX_THREADS];
-    VsizeThreadDataInt thread_data[VSIZE_MAX_THREADS];
+    pthread_t threads[VSUM_MAX_THREADS];
+    VsumThreadDataInt thread_data[VSUM_MAX_THREADS];
     size_t elements_per_thread = total_elements / num_threads;
     size_t remaining_elements = total_elements % num_threads;
     size_t current_offset = 0;
@@ -269,7 +267,7 @@ int64_t vsize_parallel_sum_int(const int *array, size_t total_elements)
         int rc = pthread_create(&threads[active_threads], NULL, process_sum_chunk_int, &thread_data[i]);
         if (rc)
         {
-            fprintf(stderr, "Error [vsize]: Failed to create thread %d, code: %d\n", i, rc);
+            fprintf(stderr, "Error [vsum]: Failed to create thread %d, code: %d\n", i, rc);
             thread_data[i].num_elements = 0; // Mark as failed
         }
         else
@@ -281,11 +279,8 @@ int64_t vsize_parallel_sum_int(const int *array, size_t total_elements)
 
     if (active_threads == 0)
     {
-        fprintf(stderr, "Warning [vsize]: No worker threads created. Falling back to sequential.\n");
-        int64_t sum = 0;
-        for (size_t i = 0; i < total_elements; ++i)
-            sum += array[i];
-        return sum;
+        fprintf(stderr, "Warning [vsum]: No worker threads created. Falling back to sequential.\n");
+        return vsum_cache_friendly_sum_int(array, total_elements); // Or a direct loop
     }
 
     for (int i = 0; i < active_threads; ++i)
@@ -307,12 +302,12 @@ int64_t vsize_parallel_sum_int(const int *array, size_t total_elements)
 /**
  * @brief Sum of an integer array using AVX2 SIMD instructions if available, falling back to SSE2.
  */
-int64_t vsize_simd_sum_int(const int *array, size_t total_elements)
+int64_t vsum_simd_sum_int(const int *array, size_t total_elements)
 {
     if (!array || total_elements == 0)
         return 0;
 
-    vsize_internal_ensure_features_checked(); // Ensure CPU features are checked
+    vsum_internal_ensure_features_checked(); // Ensure CPU features are checked
 
     int64_t total_sum = 0;
     size_t i = 0; // Index for loops
@@ -322,7 +317,7 @@ int64_t vsize_simd_sum_int(const int *array, size_t total_elements)
     {
         size_t num_vectors = total_elements / 8;
         size_t end_index = num_vectors * 8;
-        bool is_aligned = ((uintptr_t)array % VSIZE_AVX_ALIGNMENT) == 0;
+        bool is_aligned = ((uintptr_t)array % VSUM_AVX_ALIGNMENT) == 0;
 
         __m256i sum_vec_low64 = _mm256_setzero_si256();
         __m256i sum_vec_high64 = _mm256_setzero_si256();
@@ -331,7 +326,7 @@ int64_t vsize_simd_sum_int(const int *array, size_t total_elements)
         {
             // Load 8 integers (aligned or unaligned)
             __m256i data_vec;
-            if (is_aligned && ((uintptr_t)(array + i) % VSIZE_AVX_ALIGNMENT) == 0)
+            if (is_aligned && ((uintptr_t)(array + i) % VSUM_AVX_ALIGNMENT) == 0)
             {
                 data_vec = _mm256_load_si256((__m256i const *)(array + i));
             }
@@ -403,24 +398,27 @@ int64_t vsize_simd_sum_int(const int *array, size_t total_elements)
 /**
  * @brief Sum of an integer array using cache-friendly sequential access.
  */
-int64_t vsize_cache_friendly_sum_int(const int *array, size_t total_elements)
+int64_t vsum_cache_friendly_sum_int(const int *array, size_t total_elements)
 {
     if (!array || total_elements == 0)
         return 0;
 
     int64_t total_sum = 0;
     const size_t element_size = sizeof(int);
-    size_t elements_per_cacheline = (VSIZE_CACHE_LINE_SIZE / element_size);
+    size_t elements_per_cacheline = (VSUM_CACHE_LINE_SIZE / element_size);
     if (elements_per_cacheline == 0)
         elements_per_cacheline = 1;
 
     for (size_t i = 0; i < total_elements; i += elements_per_cacheline)
     {
         size_t end_chunk = (i + elements_per_cacheline > total_elements) ? total_elements : i + elements_per_cacheline;
+        // Optimized inner loop (potential for compiler unrolling)
+        int64_t chunk_sum = 0;
         for (size_t j = i; j < end_chunk; ++j)
         {
-            total_sum += array[j];
+            chunk_sum += array[j];
         }
+        total_sum += chunk_sum;
     }
     return total_sum;
 }
@@ -430,27 +428,24 @@ int64_t vsize_cache_friendly_sum_int(const int *array, size_t total_elements)
 /**
  * @brief Parallel sum of a float array using POSIX threads.
  */
-double vsize_parallel_sum_float(const float *array, size_t total_elements)
+double vsum_parallel_sum_float(const float *array, size_t total_elements)
 {
     if (!array || total_elements == 0)
         return 0.0;
 
     int num_threads = total_elements / MIN_ELEMENTS_PER_THREAD;
-    if (num_threads > VSIZE_MAX_THREADS)
-        num_threads = VSIZE_MAX_THREADS;
+    if (num_threads > VSUM_MAX_THREADS)
+        num_threads = VSUM_MAX_THREADS;
     if (num_threads < 1)
         num_threads = 1;
 
     if (num_threads == 1)
     {
-        double sum = 0.0;
-        for (size_t i = 0; i < total_elements; ++i)
-            sum += array[i];
-        return sum;
+        return vsum_cache_friendly_sum_float(array, total_elements); // Fallback
     }
 
-    pthread_t threads[VSIZE_MAX_THREADS];
-    VsizeThreadDataFloat thread_data[VSIZE_MAX_THREADS];
+    pthread_t threads[VSUM_MAX_THREADS];
+    VsumThreadDataFloat thread_data[VSUM_MAX_THREADS];
     size_t elements_per_thread = total_elements / num_threads;
     size_t remaining_elements = total_elements % num_threads;
     size_t current_offset = 0;
@@ -470,7 +465,7 @@ double vsize_parallel_sum_float(const float *array, size_t total_elements)
         int rc = pthread_create(&threads[active_threads], NULL, process_sum_chunk_float, &thread_data[i]);
         if (rc)
         {
-            fprintf(stderr, "Error [vsize]: Failed to create float thread %d, code: %d\n", i, rc);
+            fprintf(stderr, "Error [vsum]: Failed to create float thread %d, code: %d\n", i, rc);
             thread_data[i].num_elements = 0;
         }
         else
@@ -482,11 +477,8 @@ double vsize_parallel_sum_float(const float *array, size_t total_elements)
 
     if (active_threads == 0)
     {
-        fprintf(stderr, "Warning [vsize]: No float worker threads created. Falling back to sequential.\n");
-        double sum = 0.0;
-        for (size_t i = 0; i < total_elements; ++i)
-            sum += array[i];
-        return sum;
+        fprintf(stderr, "Warning [vsum]: No float worker threads created. Falling back to sequential.\n");
+        return vsum_cache_friendly_sum_float(array, total_elements); // Fallback
     }
 
     for (int i = 0; i < active_threads; ++i)
@@ -508,12 +500,12 @@ double vsize_parallel_sum_float(const float *array, size_t total_elements)
 /**
  * @brief Sum of a float array using AVX SIMD instructions if available, falling back to SSE.
  */
-double vsize_simd_sum_float(const float *array, size_t total_elements)
+double vsum_simd_sum_float(const float *array, size_t total_elements)
 {
     if (!array || total_elements == 0)
         return 0.0;
 
-    vsize_internal_ensure_features_checked();
+    vsum_internal_ensure_features_checked();
 
     double total_sum = 0.0; // Use double for final sum precision
     size_t i = 0;
@@ -523,14 +515,14 @@ double vsize_simd_sum_float(const float *array, size_t total_elements)
     {
         size_t num_vectors = total_elements / 8;
         size_t end_index = num_vectors * 8;
-        bool is_aligned = ((uintptr_t)array % VSIZE_AVX_ALIGNMENT) == 0;
+        bool is_aligned = ((uintptr_t)array % VSUM_AVX_ALIGNMENT) == 0;
 
         __m256 sum_vec = _mm256_setzero_ps(); // 8x float vector
 
         for (i = 0; i < end_index; i += 8)
         {
             __m256 data_vec;
-            if (is_aligned && ((uintptr_t)(array + i) % VSIZE_AVX_ALIGNMENT) == 0)
+            if (is_aligned && ((uintptr_t)(array + i) % VSUM_AVX_ALIGNMENT) == 0)
             {
                 data_vec = _mm256_load_ps(array + i);
             }
@@ -597,24 +589,26 @@ double vsize_simd_sum_float(const float *array, size_t total_elements)
 /**
  * @brief Sum of a float array using cache-friendly sequential access.
  */
-double vsize_cache_friendly_sum_float(const float *array, size_t total_elements)
+double vsum_cache_friendly_sum_float(const float *array, size_t total_elements)
 {
     if (!array || total_elements == 0)
         return 0.0;
 
     double total_sum = 0.0;
     const size_t element_size = sizeof(float);
-    size_t elements_per_cacheline = (VSIZE_CACHE_LINE_SIZE / element_size);
+    size_t elements_per_cacheline = (VSUM_CACHE_LINE_SIZE / element_size);
     if (elements_per_cacheline == 0)
         elements_per_cacheline = 1;
 
     for (size_t i = 0; i < total_elements; i += elements_per_cacheline)
     {
         size_t end_chunk = (i + elements_per_cacheline > total_elements) ? total_elements : i + elements_per_cacheline;
+        double chunk_sum = 0.0; // Use double for chunk sum precision
         for (size_t j = i; j < end_chunk; ++j)
         {
-            total_sum += array[j];
+            chunk_sum += array[j];
         }
+        total_sum += chunk_sum;
     }
     return total_sum;
 }
@@ -624,27 +618,24 @@ double vsize_cache_friendly_sum_float(const float *array, size_t total_elements)
 /**
  * @brief Parallel sum of a double array using POSIX threads.
  */
-double vsize_parallel_sum_double(const double *array, size_t total_elements)
+double vsum_parallel_sum_double(const double *array, size_t total_elements)
 {
     if (!array || total_elements == 0)
         return 0.0;
 
     int num_threads = total_elements / MIN_ELEMENTS_PER_THREAD;
-    if (num_threads > VSIZE_MAX_THREADS)
-        num_threads = VSIZE_MAX_THREADS;
+    if (num_threads > VSUM_MAX_THREADS)
+        num_threads = VSUM_MAX_THREADS;
     if (num_threads < 1)
         num_threads = 1;
 
     if (num_threads == 1)
     {
-        double sum = 0.0;
-        for (size_t i = 0; i < total_elements; ++i)
-            sum += array[i];
-        return sum;
+        return vsum_cache_friendly_sum_double(array, total_elements); // Fallback
     }
 
-    pthread_t threads[VSIZE_MAX_THREADS];
-    VsizeThreadDataDouble thread_data[VSIZE_MAX_THREADS];
+    pthread_t threads[VSUM_MAX_THREADS];
+    VsumThreadDataDouble thread_data[VSUM_MAX_THREADS];
     size_t elements_per_thread = total_elements / num_threads;
     size_t remaining_elements = total_elements % num_threads;
     size_t current_offset = 0;
@@ -664,7 +655,7 @@ double vsize_parallel_sum_double(const double *array, size_t total_elements)
         int rc = pthread_create(&threads[active_threads], NULL, process_sum_chunk_double, &thread_data[i]);
         if (rc)
         {
-            fprintf(stderr, "Error [vsize]: Failed to create double thread %d, code: %d\n", i, rc);
+            fprintf(stderr, "Error [vsum]: Failed to create double thread %d, code: %d\n", i, rc);
             thread_data[i].num_elements = 0;
         }
         else
@@ -676,11 +667,8 @@ double vsize_parallel_sum_double(const double *array, size_t total_elements)
 
     if (active_threads == 0)
     {
-        fprintf(stderr, "Warning [vsize]: No double worker threads created. Falling back to sequential.\n");
-        double sum = 0.0;
-        for (size_t i = 0; i < total_elements; ++i)
-            sum += array[i];
-        return sum;
+        fprintf(stderr, "Warning [vsum]: No double worker threads created. Falling back to sequential.\n");
+        return vsum_cache_friendly_sum_double(array, total_elements); // Fallback
     }
 
     for (int i = 0; i < active_threads; ++i)
@@ -702,12 +690,12 @@ double vsize_parallel_sum_double(const double *array, size_t total_elements)
 /**
  * @brief Sum of a double array using AVX SIMD instructions if available, falling back to SSE2.
  */
-double vsize_simd_sum_double(const double *array, size_t total_elements)
+double vsum_simd_sum_double(const double *array, size_t total_elements)
 {
     if (!array || total_elements == 0)
         return 0.0;
 
-    vsize_internal_ensure_features_checked();
+    vsum_internal_ensure_features_checked();
 
     double total_sum = 0.0;
     size_t i = 0;
@@ -717,14 +705,14 @@ double vsize_simd_sum_double(const double *array, size_t total_elements)
     {
         size_t num_vectors = total_elements / 4;
         size_t end_index = num_vectors * 4;
-        bool is_aligned = ((uintptr_t)array % VSIZE_AVX_ALIGNMENT) == 0;
+        bool is_aligned = ((uintptr_t)array % VSUM_AVX_ALIGNMENT) == 0;
 
         __m256d sum_vec = _mm256_setzero_pd(); // 4x double vector
 
         for (i = 0; i < end_index; i += 4)
         {
             __m256d data_vec;
-            if (is_aligned && ((uintptr_t)(array + i) % VSIZE_AVX_ALIGNMENT) == 0)
+            if (is_aligned && ((uintptr_t)(array + i) % VSUM_AVX_ALIGNMENT) == 0)
             {
                 data_vec = _mm256_load_pd(array + i);
             }
@@ -787,14 +775,14 @@ double vsize_simd_sum_double(const double *array, size_t total_elements)
 /**
  * @brief Sum of a double array using cache-friendly sequential access.
  */
-double vsize_cache_friendly_sum_double(const double *array, size_t total_elements)
+double vsum_cache_friendly_sum_double(const double *array, size_t total_elements)
 {
     if (!array || total_elements == 0)
         return 0.0;
 
     double total_sum = 0.0;
     const size_t element_size = sizeof(double);
-    size_t elements_per_cacheline = (VSIZE_CACHE_LINE_SIZE / element_size);
+    size_t elements_per_cacheline = (VSUM_CACHE_LINE_SIZE / element_size);
     if (elements_per_cacheline == 0)
         elements_per_cacheline = 1;
 
