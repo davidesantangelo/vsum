@@ -1,4 +1,4 @@
-# VSUM Library - Optimized Array Summation
+# VSUM - Optimized Array Summation
 
 **vsum** is a C library specifically designed for **highly efficient summation** of array data. It focuses on optimized summation techniques for `int`, `float`, and `double` types. It demonstrates the use of multithreading, SIMD instructions (AVX/AVX2 with fallbacks to SSE/SSE2, runtime detection, and alignment handling), and cache-aware access patterns to significantly accelerate the summation of large datasets.
 
