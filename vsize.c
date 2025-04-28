@@ -70,6 +70,8 @@
 
 // Static variables to cache CPU feature checks
 #if ARCH_X86
+static bool sse_supported = false;
+static bool sse2_supported = false;
 static bool avx_supported = false;
 static bool avx2_supported = false;
 // static bool avx512f_supported = false; // Placeholder for AVX512
@@ -87,21 +89,29 @@ static void vsize_internal_check_cpu_features_x86(void)
     unsigned int eax, ebx, ecx, edx;
     unsigned int max_level = __get_cpuid_max(0, NULL);
 
-    // Check for AVX (Function 1, ECX bit 28)
+    // Check for SSE, SSE2, AVX (Function 1)
     if (max_level >= 1)
     {
         __cpuid(1, eax, ebx, ecx, edx);
-        if (ecx & (1 << 28))
+        if (edx & (1 << 25)) // SSE check (EDX bit 25)
+        {
+            sse_supported = true;
+        }
+        if (edx & (1 << 26)) // SSE2 check (EDX bit 26)
+        {
+            sse2_supported = true;
+        }
+        if (ecx & (1 << 28)) // AVX check (ECX bit 28)
         {
             avx_supported = true;
         }
     }
 
-    // Check for AVX2 (Function 7, Sub-leaf 0, EBX bit 5)
+    // Check for AVX2 (Function 7, Sub-leaf 0)
     if (max_level >= 7)
     {
         __cpuid_count(7, 0, eax, ebx, ecx, edx);
-        if (ebx & (1 << 5))
+        if (ebx & (1 << 5)) // AVX2 check (EBX bit 5)
         {
             avx2_supported = true;
         }
@@ -112,7 +122,7 @@ static void vsize_internal_check_cpu_features_x86(void)
     }
 
     features_checked = true;
-    // printf("[vsize debug] AVX: %d, AVX2: %d\n", avx_supported, avx2_supported);
+    // printf("[vsize debug] SSE: %d, SSE2: %d, AVX: %d, AVX2: %d\n", sse_supported, sse2_supported, avx_supported, avx2_supported);
 }
 #elif ARCH_ARM_NEON
 // On ARM, NEON support is typically checked at compile time via __ARM_NEON
@@ -295,7 +305,7 @@ int64_t vsize_parallel_sum_int(const int *array, size_t total_elements)
 }
 
 /**
- * @brief Sum of an integer array using AVX2 SIMD instructions if available.
+ * @brief Sum of an integer array using AVX2 SIMD instructions if available, falling back to SSE2.
  */
 int64_t vsize_simd_sum_int(const int *array, size_t total_elements)
 {
@@ -305,30 +315,32 @@ int64_t vsize_simd_sum_int(const int *array, size_t total_elements)
     vsize_internal_ensure_features_checked(); // Ensure CPU features are checked
 
     int64_t total_sum = 0;
+    size_t i = 0; // Index for loops
 
 #if ARCH_X86
-    if (avx2_supported && total_elements >= 8) // Check runtime support and size
+    if (avx2_supported && total_elements >= 8) // Use AVX2 if available (8 ints)
     {
         size_t num_vectors = total_elements / 8;
-        size_t start_index = num_vectors * 8;
+        size_t end_index = num_vectors * 8;
         bool is_aligned = ((uintptr_t)array % VSIZE_AVX_ALIGNMENT) == 0;
 
         __m256i sum_vec_low64 = _mm256_setzero_si256();
         __m256i sum_vec_high64 = _mm256_setzero_si256();
 
-        for (size_t i = 0; i < num_vectors; ++i)
+        for (i = 0; i < end_index; i += 8)
         {
             // Load 8 integers (aligned or unaligned)
             __m256i data_vec;
-            if (is_aligned)
+            if (is_aligned && ((uintptr_t)(array + i) % VSIZE_AVX_ALIGNMENT) == 0)
             {
-                data_vec = _mm256_load_si256((__m256i const *)(array + i * 8));
+                data_vec = _mm256_load_si256((__m256i const *)(array + i));
             }
             else
             {
-                data_vec = _mm256_loadu_si256((__m256i const *)(array + i * 8));
+                data_vec = _mm256_loadu_si256((__m256i const *)(array + i));
             }
 
+            // Convert 32-bit ints to 64-bit ints and add
             __m128i data_low128 = _mm256_castsi256_si128(data_vec);
             __m128i data_high128 = _mm256_extracti128_si256(data_vec, 1);
             __m256i data_low64 = _mm256_cvtepi32_epi64(data_low128);
@@ -337,30 +349,51 @@ int64_t vsize_simd_sum_int(const int *array, size_t total_elements)
             sum_vec_high64 = _mm256_add_epi64(sum_vec_high64, data_high64);
         }
 
+        // Horizontal sum
         int64_t sums64[4];
-        _mm256_storeu_si256((__m256i *)sums64, sum_vec_low64);
-        total_sum += sums64[0] + sums64[1] + sums64[2] + sums64[3];
-        _mm256_storeu_si256((__m256i *)sums64, sum_vec_high64);
+        _mm256_storeu_si256((__m256i *)sums64, _mm256_add_epi64(sum_vec_low64, sum_vec_high64));
         total_sum += sums64[0] + sums64[1] + sums64[2] + sums64[3];
 
-        // Process remaining elements
-        for (size_t i = start_index; i < total_elements; ++i)
-        {
-            total_sum += array[i];
-        }
-        return total_sum; // Return AVX2 result
+        // i is already at end_index for the remainder loop
     }
-    // Placeholder: Add SSE implementation here if AVX2 not supported but SSE is
-    // else if (sse_supported && total_elements >= 4) { ... }
+    else if (sse2_supported && total_elements >= 4) // Fallback to SSE2 (4 ints)
+    {
+        // SSE2 needs 16-byte alignment, but loadu is safer/simpler
+        size_t num_vectors = total_elements / 4;
+        size_t end_index = num_vectors * 4;
 
+        __m128i sum_vec_low64 = _mm_setzero_si128();
+        __m128i sum_vec_high64 = _mm_setzero_si128();
+
+        for (i = 0; i < end_index; i += 4)
+        {
+            __m128i data_vec = _mm_loadu_si128((__m128i const *)(array + i));
+
+            // Convert lower 2 ints to 64-bit
+            __m128i data_low_half = data_vec; // Lower 64 bits contain the first 2 ints
+            __m128i data_low64 = _mm_cvtepi32_epi64(data_low_half);
+            sum_vec_low64 = _mm_add_epi64(sum_vec_low64, data_low64);
+
+            // Convert upper 2 ints to 64-bit
+            __m128i data_high_half = _mm_shuffle_epi32(data_vec, _MM_SHUFFLE(3, 2, 3, 2)); // Move upper 2 ints to lower half
+            __m128i data_high64 = _mm_cvtepi32_epi64(data_high_half);
+            sum_vec_high64 = _mm_add_epi64(sum_vec_high64, data_high64);
+        }
+
+        // Horizontal sum
+        int64_t sums64[2];
+        _mm_storeu_si128((__m128i *)sums64, _mm_add_epi64(sum_vec_low64, sum_vec_high64));
+        total_sum += sums64[0] + sums64[1];
+
+        // i is already at end_index for the remainder loop
+    }
 #elif ARCH_ARM_NEON
     // Placeholder: Add NEON implementation here
-    // if (neon_supported && total_elements >= 4) { ... }
+    // if (neon_supported && total_elements >= 4) { ... i = end_index; }
 #endif
 
-    // Fallback scalar implementation if no suitable SIMD available or array too small
-    // printf("Note [vsize]: Using scalar loop for vsize_simd_sum_int.\n");
-    for (size_t i = 0; i < total_elements; ++i)
+    // Process remaining elements sequentially
+    for (; i < total_elements; ++i)
     {
         total_sum += array[i];
     }
@@ -473,7 +506,7 @@ double vsize_parallel_sum_float(const float *array, size_t total_elements)
 }
 
 /**
- * @brief Sum of a float array using AVX SIMD instructions if available.
+ * @brief Sum of a float array using AVX SIMD instructions if available, falling back to SSE.
  */
 double vsize_simd_sum_float(const float *array, size_t total_elements)
 {
@@ -483,57 +516,78 @@ double vsize_simd_sum_float(const float *array, size_t total_elements)
     vsize_internal_ensure_features_checked();
 
     double total_sum = 0.0; // Use double for final sum precision
+    size_t i = 0;
 
 #if ARCH_X86
-    // AVX is sufficient for _mm256_add_ps
-    if (avx_supported && total_elements >= 8)
+    if (avx_supported && total_elements >= 8) // Use AVX (8 floats)
     {
         size_t num_vectors = total_elements / 8;
-        size_t start_index = num_vectors * 8;
+        size_t end_index = num_vectors * 8;
         bool is_aligned = ((uintptr_t)array % VSIZE_AVX_ALIGNMENT) == 0;
 
         __m256 sum_vec = _mm256_setzero_ps(); // 8x float vector
 
-        for (size_t i = 0; i < num_vectors; ++i)
+        for (i = 0; i < end_index; i += 8)
         {
             __m256 data_vec;
-            if (is_aligned)
+            if (is_aligned && ((uintptr_t)(array + i) % VSIZE_AVX_ALIGNMENT) == 0)
             {
-                data_vec = _mm256_load_ps(array + i * 8);
+                data_vec = _mm256_load_ps(array + i);
             }
             else
             {
-                data_vec = _mm256_loadu_ps(array + i * 8);
+                data_vec = _mm256_loadu_ps(array + i);
             }
             sum_vec = _mm256_add_ps(sum_vec, data_vec);
         }
 
         // Horizontal sum for float vector
-        float sums_float[8];
-        _mm256_storeu_ps(sums_float, sum_vec); // Store unaligned is fine here
-        for (int i = 0; i < 8; ++i)
+        // Extract upper and lower 128 bits, add them, then horizontal sum the 128-bit result
+        __m128 sum_low128 = _mm256_castps256_ps128(sum_vec);
+        __m128 sum_high128 = _mm256_extractf128_ps(sum_vec, 1); // AVX instruction
+        __m128 final_sum128 = _mm_add_ps(sum_low128, sum_high128);
+
+        // SSE horizontal add: __m128 has [f3, f2, f1, f0]
+        final_sum128 = _mm_hadd_ps(final_sum128, final_sum128); // [f3+f2, f1+f0, f3+f2, f1+f0]
+        final_sum128 = _mm_hadd_ps(final_sum128, final_sum128); // [f3+f2+f1+f0, ...]
+        total_sum += _mm_cvtss_f32(final_sum128);               // Extract the first float
+
+        // i is already at end_index
+    }
+    else if (sse_supported && total_elements >= 4) // Fallback to SSE (4 floats)
+    {
+        size_t num_vectors = total_elements / 4;
+        size_t end_index = num_vectors * 4;
+        __m128 sum_vec = _mm_setzero_ps(); // 4x float vector
+
+        for (i = 0; i < end_index; i += 4)
         {
-            total_sum += sums_float[i];
+            __m128 data_vec = _mm_loadu_ps(array + i); // Use unaligned load
+            sum_vec = _mm_add_ps(sum_vec, data_vec);
         }
 
-        // Process remaining elements
-        for (size_t i = start_index; i < total_elements; ++i)
-        {
-            total_sum += array[i];
-        }
-        return total_sum;
+// Horizontal sum using SSE3 hadd_ps (more efficient than storing)
+// Requires SSE3 support, which is common if SSE is present on x86-64
+#if defined(__SSE3__) // Check if compiler knows about SSE3 intrinsics
+        sum_vec = _mm_hadd_ps(sum_vec, sum_vec);
+        sum_vec = _mm_hadd_ps(sum_vec, sum_vec);
+        total_sum += _mm_cvtss_f32(sum_vec);
+#else
+        // Fallback horizontal sum if no SSE3 intrinsics (store and sum)
+        float sums_float[4];
+        _mm_storeu_ps(sums_float, sum_vec);
+        total_sum += (double)sums_float[0] + (double)sums_float[1] + (double)sums_float[2] + (double)sums_float[3];
+#endif
+        // i is already at end_index
     }
-    // Placeholder: Add SSE implementation for float here
-    // else if (sse_supported && total_elements >= 4) { ... }
 
 #elif ARCH_ARM_NEON
     // Placeholder: Add NEON implementation for float here
-    // if (neon_supported && total_elements >= 4) { ... }
+    // if (neon_supported && total_elements >= 4) { ... i = end_index; }
 #endif
 
-    // Fallback scalar implementation
-    // printf("Note [vsize]: Using scalar loop for vsize_simd_sum_float.\n");
-    for (size_t i = 0; i < total_elements; ++i)
+    // Fallback scalar implementation for remainder or if no SIMD
+    for (; i < total_elements; ++i)
     {
         total_sum += array[i];
     }
@@ -646,7 +700,7 @@ double vsize_parallel_sum_double(const double *array, size_t total_elements)
 }
 
 /**
- * @brief Sum of a double array using AVX SIMD instructions if available.
+ * @brief Sum of a double array using AVX SIMD instructions if available, falling back to SSE2.
  */
 double vsize_simd_sum_double(const double *array, size_t total_elements)
 {
@@ -656,54 +710,74 @@ double vsize_simd_sum_double(const double *array, size_t total_elements)
     vsize_internal_ensure_features_checked();
 
     double total_sum = 0.0;
+    size_t i = 0;
 
 #if ARCH_X86
-    // AVX is sufficient for _mm256_add_pd
-    if (avx_supported && total_elements >= 4) // AVX processes 4 doubles
+    if (avx_supported && total_elements >= 4) // Use AVX (4 doubles)
     {
         size_t num_vectors = total_elements / 4;
-        size_t start_index = num_vectors * 4;
+        size_t end_index = num_vectors * 4;
         bool is_aligned = ((uintptr_t)array % VSIZE_AVX_ALIGNMENT) == 0;
 
         __m256d sum_vec = _mm256_setzero_pd(); // 4x double vector
 
-        for (size_t i = 0; i < num_vectors; ++i)
+        for (i = 0; i < end_index; i += 4)
         {
             __m256d data_vec;
-            if (is_aligned)
+            if (is_aligned && ((uintptr_t)(array + i) % VSIZE_AVX_ALIGNMENT) == 0)
             {
-                data_vec = _mm256_load_pd(array + i * 4);
+                data_vec = _mm256_load_pd(array + i);
             }
             else
             {
-                data_vec = _mm256_loadu_pd(array + i * 4);
+                data_vec = _mm256_loadu_pd(array + i);
             }
             sum_vec = _mm256_add_pd(sum_vec, data_vec);
         }
 
-        // Horizontal sum for double vector
-        double sums_double[4];
-        _mm256_storeu_pd(sums_double, sum_vec);
-        total_sum += sums_double[0] + sums_double[1] + sums_double[2] + sums_double[3];
+        // Horizontal sum for double vector (AVX)
+        __m128d sum_low128 = _mm256_castpd256_pd128(sum_vec);
+        __m128d sum_high128 = _mm256_extractf128_pd(sum_vec, 1);    // AVX instruction
+        __m128d final_sum128 = _mm_add_pd(sum_low128, sum_high128); // [d1+d3, d0+d2]
 
-        // Process remaining elements
-        for (size_t i = start_index; i < total_elements; ++i)
-        {
-            total_sum += array[i];
-        }
-        return total_sum;
+        // SSE2 horizontal add:
+        final_sum128 = _mm_hadd_pd(final_sum128, final_sum128); // Requires SSE3
+        total_sum += _mm_cvtsd_f64(final_sum128);               // Extract the first double
+
+        // i is already at end_index
     }
-    // Placeholder: Add SSE2 implementation for double here (_mm_add_pd)
-    // else if (sse2_supported && total_elements >= 2) { ... }
+    else if (sse2_supported && total_elements >= 2) // Fallback to SSE2 (2 doubles)
+    {
+        size_t num_vectors = total_elements / 2;
+        size_t end_index = num_vectors * 2;
+        __m128d sum_vec = _mm_setzero_pd(); // 2x double vector
+
+        for (i = 0; i < end_index; i += 2)
+        {
+            __m128d data_vec = _mm_loadu_pd(array + i); // Use unaligned load
+            sum_vec = _mm_add_pd(sum_vec, data_vec);
+        }
+
+// Horizontal sum using SSE3 hadd_pd
+#if defined(__SSE3__)
+        sum_vec = _mm_hadd_pd(sum_vec, sum_vec);
+        total_sum += _mm_cvtsd_f64(sum_vec);
+#else
+        // Fallback horizontal sum if no SSE3 (store and sum)
+        double sums_double[2];
+        _mm_storeu_pd(sums_double, sum_vec);
+        total_sum += sums_double[0] + sums_double[1];
+#endif
+        // i is already at end_index
+    }
 
 #elif ARCH_ARM_NEON
     // Placeholder: Add NEON implementation for double here (if double precision supported)
-    // if (neon_fp64_supported && total_elements >= 2) { ... }
+    // if (neon_fp64_supported && total_elements >= 2) { ... i = end_index; }
 #endif
 
-    // Fallback scalar implementation
-    // printf("Note [vsize]: Using scalar loop for vsize_simd_sum_double.\n");
-    for (size_t i = 0; i < total_elements; ++i)
+    // Fallback scalar implementation for remainder or if no SIMD
+    for (; i < total_elements; ++i)
     {
         total_sum += array[i];
     }
