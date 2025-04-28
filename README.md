@@ -1,4 +1,4 @@
-# vsize Library
+# VSIZE Library
 
 **vsize** is a C library designed for efficient processing of array data, focusing initially on optimized summation techniques for `int`, `float`, and `double` types. It demonstrates the use of multithreading, SIMD instructions (AVX/AVX2 with runtime detection and alignment handling), and cache-aware access patterns to potentially accelerate computations on large datasets.
 
