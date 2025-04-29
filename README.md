@@ -1,6 +1,6 @@
 # VSUM Library - Optimized Array Summation
 
-**vsum** is a C library specifically designed for **highly efficient summation** of array data. It focuses on optimized summation techniques for `int`, `float`, and `double` types. It demonstrates the use of multithreading, SIMD instructions (AVX/AVX2 with fallbacks to SSE/SSE2, runtime detection, and alignment handling), and cache-aware access patterns to significantly accelerate the summation of large datasets.
+**vsum** is a C library specifically designed for **highly efficient summation** of array data. It focuses on optimized summation techniques for `int`, `float`, and `double` types. It demonstrates the use of multithreading (with dynamic thread count based on core availability), SIMD instructions (AVX/AVX2 with fallbacks to SSE/SSE2, runtime detection, SSE3 horizontal adds, and alignment handling), the `restrict` keyword for compiler optimization, and cache-aware access patterns to significantly accelerate the summation of large datasets.
 
 **Current Focus:** Optimized Integer, Float, and Double Array Summation
 
@@ -12,26 +12,28 @@
 *   **Parallel Summation:**
     *   `vsum_parallel_sum_int`, `vsum_parallel_sum_float`, `vsum_parallel_sum_double`
     *   Utilizes POSIX threads (pthreads) to divide the summation task across multiple CPU cores for maximum throughput.
-    *   Dynamically determines the number of threads based on array size and available cores (up to a defined maximum).
+    *   Dynamically determines the number of threads based on array size and available cores (via `sysconf`), capped at a reasonable internal maximum.
     *   Includes a fallback to sequential processing for small arrays or if thread creation fails.
 *   **SIMD Accelerated Summation:**
     *   `vsum_simd_sum_int`, `vsum_simd_sum_float`, `vsum_simd_sum_double`
     *   Leverages AVX/AVX2 intrinsics on x86-64 architectures if available **at runtime** for substantial speedups.
     *   **Includes fallbacks to SSE/SSE2** if AVX/AVX2 are not supported, providing acceleration on a wider range of x86-64 CPUs.
-    *   Performs runtime CPU feature detection (using CPUID) to safely use the best available SIMD instructions (AVX2, AVX, SSE2, SSE) for summation.
-    *   Checks array pointer alignment for AVX/AVX2 paths and uses faster aligned load instructions when possible, falling back to unaligned loads otherwise. SSE/SSE2 paths typically use unaligned loads for simplicity.
+    *   Performs runtime CPU feature detection (using CPUID) to safely use the best available SIMD instructions (AVX2, AVX, SSE3, SSE2, SSE) for summation. Uses SSE3 horizontal adds (`hadd`) for float/double sums when available.
+    *   Checks array pointer alignment once per call for AVX/AVX2 paths and uses faster aligned load instructions when possible, falling back to unaligned loads otherwise. SSE/SSE2 paths typically use unaligned loads.
     *   Uses 64-bit integer accumulation (`vsum_simd_sum_int`) or double-precision floating-point accumulation where appropriate to prevent overflow/precision loss during summation.
     *   Includes a standard scalar fallback if no suitable SIMD instructions are available or the array is too small.
 *   **Cache-Friendly Summation:**
     *   `vsum_cache_friendly_sum_int`, `vsum_cache_friendly_sum_float`, `vsum_cache_friendly_sum_double`
-    *   Processes the array sequentially. (Primarily for demonstration/comparison against optimized methods; modern prefetchers are often effective for simple sequential access).
-*   **Modular Design:** Provided as a simple header (`vsum.h`) and implementation (`vsum.c`) for easy integration into projects requiring fast array summation.
+    *   Processes the array sequentially. (Primarily for demonstration/comparison).
+*   **Compiler Optimization Hints:** Uses the `restrict` keyword on array parameters to potentially allow better optimization by the compiler.
+*   **Modular Design:** Provided as a simple header (`vsum.h`) and implementation (`vsum.c`) for easy integration.
 
 ## Dependencies
 
 *   **POSIX Threads (pthreads):** Required for the parallel summation features. Most Unix-like systems (Linux, macOS) provide this. Link with `-pthread`.
-*   **(Optional) AVX/AVX2/SSE/SSE2 Support:** For the SIMD summation features to provide acceleration, the target CPU must support the corresponding instructions. The library performs runtime checks, so it will safely fall back to scalar code if SIMD is not present, even if compiled with SIMD flags (like `-mavx2` or `-msse2`). Most x86-64 CPUs support at least SSE2.
-*   **Compiler Intrinsics Support:** Requires a compiler (like GCC or Clang) that supports Intel intrinsics (`immintrin.h`, `emmintrin.h`, `xmmintrin.h`) and CPUID (`cpuid.h`) on x86-64. SSE3 intrinsics (`pmmintrin.h`) are used for horizontal sums if available (detected by compiler via `__SSE3__`), otherwise a store-and-sum fallback is used.
+*   **POSIX `sysconf`:** Used to determine the number of online processors for dynamic thread count adjustment. Available on most Unix-like systems. Requires `<unistd.h>`.
+*   **(Optional) AVX/AVX2/SSE/SSE2/SSE3 Support:** For the SIMD summation features to provide acceleration, the target CPU must support the corresponding instructions. The library performs runtime checks, so it will safely fall back to scalar code if SIMD is not present, even if compiled with SIMD flags (like `-mavx2` or `-msse3`). Most x86-64 CPUs support at least SSE2; SSE3 is common and improves float/double horizontal sums.
+*   **Compiler Intrinsics Support:** Requires a compiler (like GCC or Clang) that supports Intel intrinsics (`immintrin.h`, `pmmintrin.h` for SSE3, `emmintrin.h`, `xmmintrin.h`) and CPUID (`cpuid.h`) on x86-64.
 
 ## Compilation
 
@@ -39,23 +41,23 @@ Here's an example of how to compile the library and an example program using GCC
 
 **Compile the library source into an object file:**
 
-*   **On x86-64 (Intel/AMD) - Recommended:** Enable AVX2 at compile time if your toolchain supports it. This allows the compiler to generate code for all levels (AVX2, AVX, SSE2, SSE), and the runtime check will select the best available path for summation.
+*   **On x86-64 (Intel/AMD) - Recommended:** Enable AVX2 and SSE3 at compile time if your toolchain supports it. This allows the compiler to generate code for all levels, and the runtime check will select the best available path.
     ```bash
     # Enable AVX2 (implies AVX, SSE4, SSE3, SSE2, SSE)
     gcc -c vsum.c -o vsum.o -O2 -Wall -Wextra -pthread -mavx2
-    # Or enable only up to SSE2 if AVX is not desired/available for compilation
-    # gcc -c vsum.c -o vsum.o -O2 -Wall -Wextra -pthread -msse2
+    # Or explicitly enable SSE3 if only targeting up to SSE/SSE2 but wanting hadd optimization
+    # gcc -c vsum.c -o vsum.o -O2 -Wall -Wextra -pthread -msse3
     # Using -march=native might yield slightly better code for the specific machine compiling it
     # gcc -c vsum.c -o vsum.o -O2 -Wall -Wextra -pthread -march=native
     ```
-*   **On other architectures (e.g., ARM):** The x86 SIMD parts will be disabled by preprocessor directives or fail the runtime check. NEON placeholders exist but are not yet implemented.
+*   **On other architectures (e.g., ARM):** The x86 SIMD parts will be disabled by preprocessor directives or fail the runtime check.
     ```bash
     gcc -c vsum.c -o vsum.o -O2 -Wall -Wextra -pthread
     ```
     *   `-O2`: Optimization level (or `-O3`).
     *   `-Wall -Wextra`: Enable useful compiler warnings.
     *   `-pthread`: Enable and link pthreads support.
-    *   `-mavx2` / `-msse2` / `-march=native`: (Optional, **x86-64 only**) Allows the compiler to generate specific SIMD code, which the library then guards with runtime checks.
+    *   `-mavx2` / `-msse3` / `-march=native`: (Optional, **x86-64 only**) Allows the compiler to generate specific SIMD code, which the library then guards with runtime checks. The `restrict` keyword is standard C99 and doesn't require special flags.
 
 ## Usage
 
